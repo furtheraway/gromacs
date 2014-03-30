@@ -3,7 +3,15 @@
 #
 # Copyright (c) 2009,2010,2011,2012,2013,2014, by the GROMACS development team, led by
 # Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
-# and including many others, as listed in the AUTHORS file in the
+# and including many others, as listed in the Asdfa
+ds
+fas
+df
+a
+dsf
+a
+s
+dTHORS file in the
 # top-level source directory and at http://www.gromacs.org.
 #
 # GROMACS is free software; you can redistribute it and/or
