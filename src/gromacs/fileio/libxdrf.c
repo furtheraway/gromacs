@@ -2,8 +2,8 @@
  * This file is part of the GROMACS molecular simulation package.
  *
  * Copyright (c) 1991-2000, University of Groningen, The Netherlands.
- * Copyright (c) 2001-2004, The GROMACS development team,
- * Copyright (c) 2013, by the GROMACS development team, led by
+ * Copyright (c) 2001-2004, The GROMACS development team.
+ * Copyright (c) 2013,2014, by the GROMACS development team, led by
  * Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
  * and including many others, as listed in the AUTHORS file in the
  * top-level source directory and at http://www.gromacs.org.
@@ -34,21 +34,17 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out http://www.gromacs.org.
  */
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "gmxpre.h"
 
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "xdrf.h"
-#include "xdr_datatype.h"
-#include "string2.h"
-#include "futil.h"
-#include "gmx_fatal.h"
 
+#include "gromacs/fileio/xdr_datatype.h"
+#include "gromacs/fileio/xdrf.h"
+#include "gromacs/utility/futil.h"
 
 /* This is just for clarity - it can never be anything but 4! */
 #define XDR_INT_SIZE 4
@@ -1134,7 +1130,6 @@ xtc_get_next_frame_number(FILE *fp, XDR *xdrs, int natoms)
             }
         }
     }
-    return -1;
 }
 
 
@@ -1175,7 +1170,6 @@ static float xtc_get_next_frame_time(FILE *fp, XDR *xdrs, int natoms,
             return -1;
         }
     }
-    return -1;
 }
 
 
@@ -1223,7 +1217,6 @@ xtc_get_current_frame_time(FILE *fp, XDR *xdrs, int natoms, gmx_bool * bOK)
             }
         }
     }
-    return -1;
 }
 
 /* Currently not used, just for completeness */
@@ -1273,7 +1266,6 @@ xtc_get_current_frame_number(FILE *fp, XDR *xdrs, int natoms, gmx_bool * bOK)
             }
         }
     }
-    return -1;
 }
 
 
@@ -1306,7 +1298,6 @@ static gmx_off_t xtc_get_next_frame_start(FILE *fp, XDR *xdrs, int natoms)
             return -1;
         }
     }
-    return -1;
 }
 
 
@@ -1347,7 +1338,6 @@ xdr_xtc_estimate_dt(FILE *fp, XDR *xdrs, int natoms, gmx_bool * bOK)
     return res;
 }
 
-
 int
 xdr_xtc_seek_frame(int frame, FILE *fp, XDR *xdrs, int natoms)
 {
@@ -1385,7 +1375,7 @@ xdr_xtc_seek_frame(int frame, FILE *fp, XDR *xdrs, int natoms)
         {
             return -1;
         }
-        if (fr != frame && abs(low-high) > header_size)
+        if (fr != frame && llabs(low-high) > header_size)
         {
             if (fr < frame)
             {
@@ -1446,7 +1436,7 @@ int xdr_xtc_seek_time(real time, FILE *fp, XDR *xdrs, int natoms, gmx_bool bSeek
 
     if (bSeekForwardOnly)
     {
-        low = gmx_ftell(fp);
+        low = gmx_ftell(fp)-header_size;
     }
     if (gmx_fseek(fp, 0, SEEK_END))
     {
@@ -1519,10 +1509,9 @@ int xdr_xtc_seek_time(real time, FILE *fp, XDR *xdrs, int natoms, gmx_bool bSeek
            the current time and the target time is bigger than dt and above all the distance between high
            and low is bigger than 1 frame, then do another step of binary search. Otherwise stop and check
            if we reached the solution */
-        if ((((t < time && dt_sign >= 0) || (t > time && dt_sign == -1)) || ((t
-                                                                              - time) >= dt && dt_sign >= 0)
-             || ((time - t) >= -dt && dt_sign < 0)) && (abs(low - high)
-                                                        > header_size))
+        if ((((t < time && dt_sign >= 0) || (t > time && dt_sign == -1)) ||
+             ((t - time) >= dt && dt_sign >= 0) || ((time - t) >= -dt && dt_sign < 0)) &&
+            (llabs(low - high) > header_size))
         {
             if (dt >= 0 && dt_sign != -1)
             {
@@ -1560,7 +1549,7 @@ int xdr_xtc_seek_time(real time, FILE *fp, XDR *xdrs, int natoms, gmx_bool bSeek
         }
         else
         {
-            if (abs(low - high) <= header_size)
+            if (llabs(low - high) <= header_size)
             {
                 break;
             }

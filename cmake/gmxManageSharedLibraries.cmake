@@ -32,14 +32,14 @@
 # To help us fund GROMACS development, we humbly ask that you cite
 # the research papers on the package. Check out http://www.gromacs.org.
 
-# Manage the Gromacs shared librar setup. 
+# Manage the Gromacs shared library setup.
 
 ########################################################################
 # Shared/static library settings
 ########################################################################
 # Determine the defaults (this block has no effect if the variables have
 # already been set)
-if(APPLE OR CYGWIN OR ${CMAKE_SYSTEM_NAME} MATCHES "Linux|.*BSD")
+if((APPLE OR CYGWIN OR ${CMAKE_SYSTEM_NAME} MATCHES "Linux|.*BSD|GNU") AND NOT GMX_BUILD_MDRUN_ONLY)
     # Maybe Solaris should be here? Patch this if you know!
     SET(SHARED_LIBS_DEFAULT ON)
 elseif(WIN32 OR ${CMAKE_SYSTEM_NAME} MATCHES "BlueGene")
@@ -60,16 +60,20 @@ if (GMX_PREFER_STATIC_LIBS)
     set(SHARED_LIBS_DEFAULT OFF)
 endif()
 set(GMX_PREFER_STATIC_LIBS_DEFAULT OFF)
-if (WIN32 AND NOT CYGWIN AND NOT BUILD_SHARED_LIBS)
+if (WIN32 AND NOT BUILD_SHARED_LIBS)
     set(GMX_PREFER_STATIC_LIBS_DEFAULT ON)
 endif()
 
 # Declare the user-visible options
 option(BUILD_SHARED_LIBS "Enable shared libraries (can be problematic e.g. with MPI, or on some HPC systems)" ${SHARED_LIBS_DEFAULT})
+if(BUILD_SHARED_LIBS AND GMX_BUILD_MDRUN_ONLY)
+    message(WARNING "Both BUILD_SHARED_LIBS and GMX_BUILD_MDRUN_ONLY are set. Generally, an mdrun-only build should prefer to use static libraries, which is the default if you make a fresh build tree. You may be re-using an old build tree, and so may wish to set BUILD_SHARED_LIBS=off yourself.")
+endif()
+
 if (UNIX)
     set(GMX_PREFER_STATIC_LIBS_DESCRIPTION
         "When finding libraries prefer static archives (it will only work if static versions of external dependencies are available and found)")
-elseif (WIN32 AND NOT CYGWIN)
+elseif (WIN32)
     set(GMX_PREFER_STATIC_LIBS_DESCRIPTION
         "When finding libraries prefer static system libraries (MT instead of MD)")
 endif()
@@ -108,19 +112,24 @@ function(gmx_manage_prefer_static_libs_flags build_type)
     endforeach()
 endfunction()
 
-IF( WIN32 AND NOT CYGWIN)
+IF( WIN32)
   if (NOT BUILD_SHARED_LIBS)
       if(NOT GMX_PREFER_STATIC_LIBS)
           message(WARNING "Shared system libraries requested, and static Gromacs libraries requested.")
       endif()
   else()
-      message(FATAL_ERROR "BUILD_SHARED_LIBS=ON not yet working for Windows in the master branch")
+      if(MINGW)
+          set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--export-all-symbols ${CMAKE_SHARED_LINKER_FLAGS}")
+      else()
+          message(FATAL_ERROR "BUILD_SHARED_LIBS=ON not yet working for Windows in the master branch")
+      endif()
       if(GMX_PREFER_STATIC_LIBS)
           #this combination segfaults (illegal passing of file handles)
           message(FATAL_ERROR "Static system libraries requested, and shared Gromacs libraries requested.")
       endif()
-      add_definitions(-DUSE_VISIBILITY -DTMPI_USE_VISIBILITY)
-      set(PKG_CFLAGS "$PKG_CFLAGS -DUSE_VISIBILITY -DTMPI_USE_VISIBILITY")
+      # Visibility not yet implemented
+      # add_definitions(-DUSE_VISIBILITY -DTMPI_USE_VISIBILITY)
+      # set(PKG_CFLAGS "$PKG_CFLAGS -DUSE_VISIBILITY -DTMPI_USE_VISIBILITY")
   endif()
 
   IF (GMX_PREFER_STATIC_LIBS)

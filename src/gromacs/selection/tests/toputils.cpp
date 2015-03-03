@@ -1,7 +1,7 @@
 /*
  * This file is part of the GROMACS molecular simulation package.
  *
- * Copyright (c) 2013, by the GROMACS development team, led by
+ * Copyright (c) 2013,2014, by the GROMACS development team, led by
  * Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
  * and including many others, as listed in the AUTHORS file in the
  * top-level source directory and at http://www.gromacs.org.
@@ -39,18 +39,20 @@
  * \author Teemu Murtola <teemu.murtola@gmail.com>
  * \ingroup module_selection
  */
+#include "gmxpre.h"
+
 #include "toputils.h"
 
 #include <cstring>
 
-#include "gromacs/legacyheaders/smalloc.h"
-#include "gromacs/legacyheaders/string2.h"
-#include "gromacs/legacyheaders/typedefs.h"
-#include "gromacs/legacyheaders/vec.h"
-
 #include "gromacs/fileio/tpxio.h"
+#include "gromacs/fileio/trx.h"
 #include "gromacs/fileio/trxio.h"
+#include "gromacs/math/vec.h"
+#include "gromacs/topology/atoms.h"
+#include "gromacs/topology/topology.h"
 #include "gromacs/utility/gmxassert.h"
+#include "gromacs/utility/smalloc.h"
 
 #include "testutils/testfilemanager.h"
 
@@ -173,7 +175,7 @@ void TopologyManager::initAtomTypes(int count, const char *const types[])
     atomtypes_.reserve(count);
     for (int i = 0; i < count; ++i)
     {
-        atomtypes_.push_back(strdup(types[i]));
+        atomtypes_.push_back(gmx_strdup(types[i]));
     }
     snew(top_->atoms.atomtype, top_->atoms.nr);
     for (int i = 0, j = 0; i < top_->atoms.nr; ++i, ++j)

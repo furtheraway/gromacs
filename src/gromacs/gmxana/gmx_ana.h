@@ -3,7 +3,7 @@
  *
  * Copyright (c) 1991-2000, University of Groningen, The Netherlands.
  * Copyright (c) 2001-2008, The GROMACS development team.
- * Copyright (c) 2013,2014, by the GROMACS development team, led by
+ * Copyright (c) 2013,2014,2015, by the GROMACS development team, led by
  * Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
  * and including many others, as listed in the AUTHORS file in the
  * top-level source directory and at http://www.gromacs.org.
@@ -148,9 +148,6 @@ int
 gmx_hydorder(int argc, char *argv[]);
 
 int
-gmx_kinetics(int argc, char *argv[]);
-
-int
 gmx_make_edi(int argc, char *argv[]);
 
 int
@@ -191,9 +188,6 @@ gmx_principal(int argc, char *argv[]);
 
 int
 gmx_rama(int argc, char *argv[]);
-
-int
-gmx_rdf(int argc, char *argv[]);
 
 int
 gmx_rotmat(int argc, char *argv[]);
@@ -272,9 +266,6 @@ gmx_membed(int argc, char *argv[]);
 
 int
 gmx_pme_error(int argc, char *argv[]);
-
-int
-gmx_options(int argc, char *argv[]);
 
 int
 gmx_sans(int argc, char *argv[]);

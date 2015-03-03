@@ -3,7 +3,7 @@
  *
  * Copyright (c) 1991-2000, University of Groningen, The Netherlands.
  * Copyright (c) 2001-2004, The GROMACS development team.
- * Copyright (c) 2013,2014, by the GROMACS development team, led by
+ * Copyright (c) 2013,2014,2015, by the GROMACS development team, led by
  * Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
  * and including many others, as listed in the AUTHORS file in the
  * top-level source directory and at http://www.gromacs.org.
@@ -34,43 +34,48 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out http://www.gromacs.org.
  */
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "gmxpre.h"
 
-#include <stdio.h>
-#include <math.h>
-#include <ctype.h>
-
-#include "vec.h"
-#include "smalloc.h"
-#include "macros.h"
-#include "symtab.h"
-#include "gromacs/fileio/futil.h"
-#include "gmx_fatal.h"
 #include "pdb2top.h"
-#include "gpp_nextnb.h"
-#include "topdirs.h"
-#include "toputil.h"
-#include "h_db.h"
-#include "pgutil.h"
-#include "resall.h"
-#include "topio.h"
-#include "string2.h"
-#include "physics.h"
-#include "gromacs/fileio/pdbio.h"
-#include "gen_ad.h"
-#include "gromacs/fileio/filenm.h"
-#include "index.h"
-#include "gen_vsite.h"
-#include "add_par.h"
-#include "toputil.h"
-#include "fflibutil.h"
-#include "copyrite.h"
 
+#include <ctype.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include "gromacs/fileio/filenm.h"
+#include "gromacs/fileio/pdbio.h"
 #include "gromacs/fileio/strdb.h"
+#include "gromacs/gmxpreprocess/add_par.h"
+#include "gromacs/gmxpreprocess/fflibutil.h"
+#include "gromacs/gmxpreprocess/gen_ad.h"
+#include "gromacs/gmxpreprocess/gen_vsite.h"
+#include "gromacs/gmxpreprocess/gpp_nextnb.h"
+#include "gromacs/gmxpreprocess/h_db.h"
+#include "gromacs/gmxpreprocess/pgutil.h"
+#include "gromacs/gmxpreprocess/resall.h"
+#include "gromacs/gmxpreprocess/topdirs.h"
+#include "gromacs/gmxpreprocess/topio.h"
+#include "gromacs/gmxpreprocess/toputil.h"
+#include "gromacs/legacyheaders/copyrite.h"
+#include "gromacs/legacyheaders/macros.h"
+#include "gromacs/math/vec.h"
+#include "gromacs/topology/residuetypes.h"
+#include "gromacs/topology/symtab.h"
+#include "gromacs/utility/cstringutil.h"
+#include "gromacs/utility/dir_separator.h"
 #include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/file.h"
+#include "gromacs/utility/futil.h"
+#include "gromacs/utility/path.h"
 #include "gromacs/utility/programcontext.h"
+#include "gromacs/utility/smalloc.h"
+#include "gromacs/utility/stringutil.h"
 
 /* this must correspond to enum in pdb2top.h */
 const char *hh[ehisNR]   = { "HISD", "HISE", "HISH", "HIS1" };
@@ -123,89 +128,47 @@ gmx_bool is_int(double x)
     return (fabs(x-ix) < tol);
 }
 
-static void swap_strings(char **s, int i, int j)
+static void
+choose_ff_impl(const char *ffsel,
+               char *forcefield, int ff_maxlen,
+               char *ffdir, int ffdir_maxlen)
 {
-    char *tmp;
-
-    tmp  = s[i];
-    s[i] = s[j];
-    s[j] = tmp;
-}
-
-void
-choose_ff(const char *ffsel,
-          char *forcefield, int ff_maxlen,
-          char *ffdir, int ffdir_maxlen)
-{
-    int    nff;
-    char **ffdirs, **ffs, **ffs_dir, *ptr;
-    int    i, j, sel, cwdsel, nfound;
-    char   buf[STRLEN], **desc;
-    FILE  *fp;
-    char  *pret;
-
-    nff = fflib_search_file_in_dirend(fflib_forcefield_itp(),
-                                      fflib_forcefield_dir_ext(),
-                                      &ffdirs);
-
-    if (nff == 0)
-    {
-        gmx_fatal(FARGS, "No force fields found (files with name '%s' in subdirectories ending on '%s')",
-                  fflib_forcefield_itp(), fflib_forcefield_dir_ext());
-    }
+    std::vector<gmx::DataFileInfo> ffdirs = fflib_enumerate_forcefields();
+    const int nff = static_cast<int>(ffdirs.size());
 
     /* Replace with unix path separators */
     if (DIR_SEPARATOR != '/')
     {
-        for (i = 0; i < nff; i++)
+        for (int i = 0; i < nff; ++i)
         {
-            while ( (ptr = strchr(ffdirs[i], DIR_SEPARATOR)) != NULL)
-            {
-                *ptr = '/';
-            }
+            std::replace(ffdirs[i].dir.begin(), ffdirs[i].dir.end(), DIR_SEPARATOR, '/');
         }
     }
 
     /* Store the force field names in ffs */
-    snew(ffs, nff);
-    snew(ffs_dir, nff);
-    for (i = 0; i < nff; i++)
+    std::vector<std::string> ffs;
+    ffs.reserve(ffdirs.size());
+    for (int i = 0; i < nff; ++i)
     {
-        /* Remove the path from the ffdir name - use our unix standard here! */
-        ptr = strrchr(ffdirs[i], '/');
-        if (ptr == NULL)
-        {
-            ffs[i]     = strdup(ffdirs[i]);
-            ffs_dir[i] = low_gmxlibfn(ffdirs[i], FALSE, FALSE);
-            if (ffs_dir[i] == NULL)
-            {
-                gmx_fatal(FARGS, "Can no longer find file '%s'", ffdirs[i]);
-            }
-        }
-        else
-        {
-            ffs[i]     = strdup(ptr+1);
-            ffs_dir[i] = strdup(ffdirs[i]);
-        }
-        ffs_dir[i][strlen(ffs_dir[i])-strlen(ffs[i])-1] = '\0';
-        /* Remove the extension from the ffdir name */
-        ffs[i][strlen(ffs[i])-strlen(fflib_forcefield_dir_ext())] = '\0';
+        ffs.push_back(gmx::stripSuffixIfPresent(ffdirs[i].name,
+                                                fflib_forcefield_dir_ext()));
     }
 
+    int sel;
     if (ffsel != NULL)
     {
-        sel     = -1;
-        cwdsel  = -1;
-        nfound  = 0;
-        for (i = 0; i < nff; i++)
+        sel         = -1;
+        int cwdsel  = -1;
+        int nfound  = 0;
+        for (int i = 0; i < nff; ++i)
         {
-            if (strcmp(ffs[i], ffsel) == 0)
+            if (ffs[i] == ffsel)
             {
                 /* Matching ff name */
                 sel = i;
                 nfound++;
 
-                if (strncmp(ffs_dir[i], ".", 1) == 0)
+                if (ffdirs[i].dir == ".")
                 {
                     cwdsel = i;
                 }
@@ -228,77 +191,88 @@ choose_ff(const char *ffsel,
             }
             else
             {
-                gmx_fatal(FARGS,
-                          "Force field '%s' occurs in %d places, but not in the current directory.\n"
-                          "Run without the -ff switch and select the force field interactively.", ffsel, nfound);
+                std::string message = gmx::formatString(
+                            "Force field '%s' occurs in %d places, but not in "
+                            "the current directory.\n"
+                            "Run without the -ff switch and select the force "
+                            "field interactively.", ffsel, nfound);
+                GMX_THROW(gmx::InconsistentInputError(message));
             }
         }
         else if (nfound == 0)
         {
-            gmx_fatal(FARGS, "Could not find force field '%s' in current directory, install tree or GMXDATA path.", ffsel);
+            std::string message = gmx::formatString(
+                        "Could not find force field '%s' in current directory, "
+                        "install tree or GMXLIB path.", ffsel);
+            GMX_THROW(gmx::InconsistentInputError(message));
         }
     }
     else if (nff > 1)
     {
-        snew(desc, nff);
-        for (i = 0; (i < nff); i++)
+        std::vector<std::string> desc;
+        desc.reserve(ffdirs.size());
+        for (int i = 0; i < nff; ++i)
         {
-            sprintf(buf, "%s%c%s%s%c%s",
-                    ffs_dir[i], DIR_SEPARATOR,
-                    ffs[i], fflib_forcefield_dir_ext(), DIR_SEPARATOR,
-                    fflib_forcefield_doc());
-            if (gmx_fexist(buf))
+            std::string docFileName(
+                    gmx::Path::join(ffdirs[i].dir, ffdirs[i].name,
+                                    fflib_forcefield_doc()));
+            // TODO: Just try to open the file with a method that does not
+            // throw/bail out with a fatal error instead of multiple checks.
+            if (gmx::File::exists(docFileName))
             {
+                // TODO: Use a C++ API without such an intermediate/fixed-length buffer.
+                char  buf[STRLEN];
                 /* We don't use fflib_open, because we don't want printf's */
-                fp = gmx_ffopen(buf, "r");
-                snew(desc[i], STRLEN);
-                get_a_line(fp, desc[i], STRLEN);
+                FILE *fp = gmx_ffopen(docFileName.c_str(), "r");
+                get_a_line(fp, buf, STRLEN);
                 gmx_ffclose(fp);
+                desc.push_back(buf);
             }
             else
             {
-                desc[i] = strdup(ffs[i]);
+                desc.push_back(ffs[i]);
             }
         }
         /* Order force fields from the same dir alphabetically
          * and put deprecated force fields at the end.
          */
-        for (i = 0; (i < nff); i++)
+        for (int i = 0; i < nff; ++i)
         {
-            for (j = i+1; (j < nff); j++)
+            for (int j = i + 1; j < nff; ++j)
             {
-                if (strcmp(ffs_dir[i], ffs_dir[j]) == 0 &&
+                if (ffdirs[i].dir == ffdirs[j].dir &&
                     ((desc[i][0] == '[' && desc[j][0] != '[') ||
                      ((desc[i][0] == '[' || desc[j][0] != '[') &&
-                      gmx_strcasecmp(desc[i], desc[j]) > 0)))
+                      gmx_strcasecmp(desc[i].c_str(), desc[j].c_str()) > 0)))
                 {
-                    swap_strings(ffdirs, i, j);
-                    swap_strings(ffs, i, j);
-                    swap_strings(desc, i, j);
+                    std::swap(ffdirs[i].name, ffdirs[j].name);
+                    std::swap(ffs[i], ffs[j]);
+                    std::swap(desc[i], desc[j]);
                 }
             }
         }
 
         printf("\nSelect the Force Field:\n");
-        for (i = 0; (i < nff); i++)
+        for (int i = 0; i < nff; ++i)
         {
-            if (i == 0 || strcmp(ffs_dir[i-1], ffs_dir[i]) != 0)
+            if (i == 0 || ffdirs[i-1].dir != ffdirs[i].dir)
             {
-                if (strcmp(ffs_dir[i], ".") == 0)
+                if (ffdirs[i].dir == ".")
                 {
                     printf("From current directory:\n");
                 }
                 else
                 {
-                    printf("From '%s':\n", ffs_dir[i]);
+                    printf("From '%s':\n", ffdirs[i].dir.c_str());
                 }
             }
-            printf("%2d: %s\n", i+1, desc[i]);
-            sfree(desc[i]);
+            printf("%2d: %s\n", i+1, desc[i].c_str());
         }
-        sfree(desc);
 
         sel = -1;
+        // TODO: Add a C++ API for this.
+        char   buf[STRLEN];
+        char  *pret;
         do
         {
             pret = fgets(buf, STRLEN, stdin);
@@ -316,12 +290,20 @@ choose_ff(const char *ffsel,
          * This check assumes that the order of ffs matches the order
          * in which fflib_open searches ff library files.
          */
-        for (i = 0; i < sel; i++)
+        for (int i = 0; i < sel; i++)
         {
-            if (strcmp(ffs[i], ffs[sel]) == 0)
+            if (ffs[i] == ffs[sel])
             {
-                gmx_fatal(FARGS, "Can only select the first of multiple force field entries with directory name '%s%s' in the list. If you want to use the next entry, run pdb2gmx in a different directory or rename or move the force field directory present in the current working directory.",
-                          ffs[sel], fflib_forcefield_dir_ext());
+                std::string message = gmx::formatString(
+                            "Can only select the first of multiple force "
+                            "field entries with directory name '%s%s' in "
+                            "the list. If you want to use the next entry, "
+                            "run pdb2gmx in a different directory, set GMXLIB "
+                            "to point to the desired force field first, and/or "
+                            "rename or move the force field directory present "
+                            "in the current working directory.",
+                            ffs[sel].c_str(), fflib_forcefield_dir_ext());
+                GMX_THROW(gmx::NotImplementedError(message));
             }
         }
     }
@@ -330,29 +312,44 @@ choose_ff(const char *ffsel,
         sel = 0;
     }
 
-    if (strlen(ffs[sel]) >= (size_t)ff_maxlen)
+    if (ffs[sel].length() >= static_cast<size_t>(ff_maxlen))
     {
-        gmx_fatal(FARGS, "Length of force field name (%d) >= maxlen (%d)",
-                  strlen(ffs[sel]), ff_maxlen);
+        std::string message = gmx::formatString(
+                    "Length of force field name (%d) >= maxlen (%d)",
+                    static_cast<int>(ffs[sel].length()), ff_maxlen);
+        GMX_THROW(gmx::InvalidInputError(message));
     }
-    strcpy(forcefield, ffs[sel]);
+    strcpy(forcefield, ffs[sel].c_str());
 
-    if (strlen(ffdirs[sel]) >= (size_t)ffdir_maxlen)
+    std::string ffpath;
+    if (ffdirs[sel].bFromDefaultDir)
     {
-        gmx_fatal(FARGS, "Length of force field dir (%d) >= maxlen (%d)",
-                  strlen(ffdirs[sel]), ffdir_maxlen);
+        ffpath = ffdirs[sel].name;
     }
-    strcpy(ffdir, ffdirs[sel]);
+    else
+    {
+        ffpath = gmx::Path::join(ffdirs[sel].dir, ffdirs[sel].name);
+    }
+    if (ffpath.length() >= static_cast<size_t>(ffdir_maxlen))
+    {
+        std::string message = gmx::formatString(
+                    "Length of force field dir (%d) >= maxlen (%d)",
+                    static_cast<int>(ffpath.length()), ffdir_maxlen);
+        GMX_THROW(gmx::InvalidInputError(message));
+    }
+    strcpy(ffdir, ffpath.c_str());
+}
 
-    for (i = 0; (i < nff); i++)
+void
+choose_ff(const char *ffsel,
+          char *forcefield, int ff_maxlen,
+          char *ffdir, int ffdir_maxlen)
+{
+    try
     {
-        sfree(ffdirs[i]);
-        sfree(ffs[i]);
-        sfree(ffs_dir[i]);
+        choose_ff_impl(ffsel, forcefield, ff_maxlen, ffdir, ffdir_maxlen);
     }
-    sfree(ffdirs);
-    sfree(ffs);
-    sfree(ffs_dir);
+    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
 
 void choose_watermodel(const char *wmsel, const char *ffdir,
@@ -374,7 +371,7 @@ void choose_watermodel(const char *wmsel, const char *ffdir,
     }
     else if (strcmp(wmsel, "select") != 0)
     {
-        *watermodel = strdup(wmsel);
+        *watermodel = gmx_strdup(wmsel);
 
         return;
     }
@@ -432,7 +429,7 @@ void choose_watermodel(const char *wmsel, const char *ffdir,
     }
     else
     {
-        *watermodel = strdup(model[sel]);
+        *watermodel = gmx_strdup(model[sel]);
     }
 
     for (i = 0; i < nwm; i++)
@@ -442,8 +439,8 @@ void choose_watermodel(const char *wmsel, const char *ffdir,
     sfree(model);
 }
 
-static int name2type(t_atoms *at, int **cgnr, gpp_atomtype_t atype,
-                     t_restp restp[], gmx_residuetype_t rt)
+static int name2type(t_atoms *at, int **cgnr,
+                     t_restp restp[], gmx_residuetype_t *rt)
 {
     int         i, j, prevresind, resind, i0, prevcg, cg, curcg;
     char       *name;
@@ -492,9 +489,8 @@ static int name2type(t_atoms *at, int **cgnr, gpp_atomtype_t atype,
             j                = search_jtype(&restp[resind], name, bNterm);
             at->atom[i].type = restp[resind].atom[j].type;
             at->atom[i].q    = restp[resind].atom[j].q;
-            at->atom[i].m    = get_atomtype_massA(restp[resind].atom[j].type,
-                                                  atype);
-            cg = restp[resind].cgnr[j];
+            at->atom[i].m    = restp[resind].atom[j].m;
+            cg               = restp[resind].cgnr[j];
             /* A charge group number -1 signals a separate charge group
              * for this atom.
              */
@@ -736,22 +732,7 @@ void write_top(FILE *out, char *pr, char *molname,
     }
 }
 
-static atom_id search_res_atom(const char *type, int resind,
-                               t_atoms *atoms,
-                               const char *bondtype, gmx_bool bAllowMissing)
-{
-    int i;
 
-    for (i = 0; (i < atoms->nr); i++)
-    {
-        if (atoms->atom[i].resind == resind)
-        {
-            return search_atom(type, i, atoms, bondtype, bAllowMissing);
-        }
-    }
-
-    return NO_ATID;
-}
 
 static void do_ssbonds(t_params *ps, t_atoms *atoms,
                        int nssbonds, t_ssbond *ssbonds, gmx_bool bAllowMissing)
@@ -817,6 +798,7 @@ static void at2bonds(t_params *psb, t_hackblock *hb,
             {
                 dist2 = distance2(x[ai], x[aj]);
                 if (dist2 > long_bond_dist2)
+
                 {
                     fprintf(stderr, "Warning: Long Bond (%d-%d = %g nm)\n",
                             ai+1, aj+1, sqrt(dist2));
@@ -1018,7 +1000,7 @@ void add_atom_to_restp(t_restp *restp, int at_start, const t_hack *hack)
         }
         snew( restp->atomname[at_start+1+k], 1);
         restp->atom     [at_start+1+k] = *hack->atom;
-        *restp->atomname[at_start+1+k] = strdup(buf);
+        *restp->atomname[at_start+1+k] = gmx_strdup(buf);
         if (hack->cgnr != NOTSET)
         {
             restp->cgnr   [at_start+1+k] = hack->cgnr;
@@ -1192,7 +1174,7 @@ void get_hackblocks_rtp(t_hackblock **hb, t_restp **restp,
                             }
                             snew( (*restp)[i].atomname[l], 1);
                             (*restp)[i].atom[l]      =       *(*hb)[i].hack[j].atom;
-                            *(*restp)[i].atomname[l] = strdup((*hb)[i].hack[j].nname);
+                            *(*restp)[i].atomname[l] = gmx_strdup((*hb)[i].hack[j].nname);
                             if ( (*hb)[i].hack[j].cgnr != NOTSET)
                             {
                                 (*restp)[i].cgnr   [l] = (*hb)[i].hack[j].cgnr;
@@ -1349,7 +1331,7 @@ static gmx_bool match_atomnames_with_rtp_atom(t_atoms *pdba, rvec *x, int atind,
             }
             /* Rename the atom in pdba */
             snew(pdba->atomname[atind], 1);
-            *pdba->atomname[atind] = strdup(newnm);
+            *pdba->atomname[atind] = gmx_strdup(newnm);
         }
         else if (hbr->hack[j].oname != NULL && hbr->hack[j].nname == NULL &&
                  gmx_strcasecmp(oldnm, hbr->hack[j].oname) == 0)
@@ -1427,10 +1409,11 @@ void match_atomnames_with_rtp(t_restp restp[], t_hackblock hb[],
 }
 
 #define NUM_CMAP_ATOMS 5
-static void gen_cmap(t_params *psb, t_restp *restp, t_atoms *atoms, gmx_residuetype_t rt)
+static void gen_cmap(t_params *psb, t_restp *restp, t_atoms *atoms)
 {
     int         residx, i, j, k;
     const char *ptr;
+    const char *pname;
     t_resinfo  *resinfo = atoms->resinfo;
     int         nres    = atoms->nres;
     gmx_bool    bAddCMAP;
@@ -1446,11 +1429,14 @@ static void gen_cmap(t_params *psb, t_restp *restp, t_atoms *atoms, gmx_residuet
         ptr = "check";
     }
 
-    fprintf(stderr, "Making cmap torsions...");
+    fprintf(stderr, "Making cmap torsions...\n");
     i = 0;
-    /* End loop at nres-1, since the very last residue does not have a +N atom, and
-     * therefore we get a valgrind invalid 4 byte read error with atom am */
-    for (residx = 0; residx < nres-1; residx++)
+    /* Most cmap entries use the N atom from the next residue, so the last
+     * residue should not have its CMAP entry in that case, but for things like
+     * dipeptides we sometimes define a complete CMAP entry inside a residue,
+     * and in this case we need to process everything through the last residue.
+     */
+    for (residx = 0; residx < nres; residx++)
     {
         /* Add CMAP terms from the list of CMAP interactions */
         for (j = 0; j < restp[residx].rb[ebtsCMAP].nb; j++)
@@ -1461,7 +1447,21 @@ static void gen_cmap(t_params *psb, t_restp *restp, t_atoms *atoms, gmx_residuet
              * from residues labelled as protein. */
             for (k = 0; k < NUM_CMAP_ATOMS && bAddCMAP; k++)
             {
-                cmap_atomid[k] = search_atom(restp[residx].rb[ebtsCMAP].b[j].a[k],
+                /* Assign the pointer to the name of the next reference atom.
+                 * This can use -/+ labels to refer to previous/next residue.
+                 */
+                pname = restp[residx].rb[ebtsCMAP].b[j].a[k];
+                /* Skip this CMAP entry if it refers to residues before the
+                 * first or after the last residue.
+                 */
+                if (((strchr(pname, '-') != NULL) && (residx == 0)) ||
+                    ((strchr(pname, '+') != NULL) && (residx == nres-1)))
+                {
+                    bAddCMAP = FALSE;
+                    break;
+                }
+
+                cmap_atomid[k] = search_atom(pname,
                                              i, atoms, ptr, TRUE);
                 bAddCMAP = bAddCMAP && (cmap_atomid[k] != NO_ATID);
                 if (!bAddCMAP)
@@ -1484,7 +1484,17 @@ static void gen_cmap(t_params *psb, t_restp *restp, t_atoms *atoms, gmx_residuet
                     bAddCMAP = bAddCMAP &&
                         cmap_chainnum == resinfo[this_residue_index].chainnum;
                 }
-                bAddCMAP = bAddCMAP && gmx_residuetype_is_protein(rt, *(resinfo[this_residue_index].name));
+                /* Here we used to check that the residuetype was protein and
+                 * disable bAddCMAP if that was not the case. However, some
+                 * special residues (say, alanine dipeptides) might not adhere
+                 * to standard naming, and if we start calling them normal
+                 * protein residues the user will be bugged to select termini.
+                 *
+                 * Instead, I believe that the right course of action is to
+                 * keep the CMAP interaction if it is present in the RTP file
+                 * and we correctly identified all atoms (which is the case
+                 * if we got here).
+                 */
             }
 
             if (bAddCMAP)
@@ -1501,7 +1511,6 @@ static void gen_cmap(t_params *psb, t_restp *restp, t_atoms *atoms, gmx_residuet
             }
         }
     }
-
     /* Start the next residue */
 }
 
@@ -1541,7 +1550,7 @@ void pdb2top(FILE *top_file, char *posre_fn, char *molname,
     int              *vsite_type;
     int               i, nmissat;
     int               bts[ebtsNR];
-    gmx_residuetype_t rt;
+    gmx_residuetype_t*rt;
 
     init_plist(plist);
     gmx_residuetype_init(&rt);
@@ -1562,7 +1571,7 @@ void pdb2top(FILE *top_file, char *posre_fn, char *molname,
                atoms, nssbonds, ssbonds,
                bAllowMissing);
 
-    nmissat = name2type(atoms, &cgnr, atype, restp, rt);
+    nmissat = name2type(atoms, &cgnr, restp, rt);
     if (nmissat)
     {
         if (bAllowMissing)
@@ -1605,7 +1614,7 @@ void pdb2top(FILE *top_file, char *posre_fn, char *molname,
     /* Make CMAP */
     if (TRUE == bCmap)
     {
-        gen_cmap(&(plist[F_CMAP]), restp, atoms, rt);
+        gen_cmap(&(plist[F_CMAP]), restp, atoms);
         if (plist[F_CMAP].nr > 0)
         {
             fprintf(stderr, "There are %4d cmap torsion pairs\n",

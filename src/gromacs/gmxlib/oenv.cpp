@@ -34,46 +34,35 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out http://www.gromacs.org.
  */
-#include "oenv.h"
+#include "gmxpre.h"
 
-#include "smalloc.h"
+#include "gromacs/legacyheaders/oenv.h"
 
-#include "gromacs/commandline/cmdlineprogramcontext.h"
 #include "gromacs/utility/exceptions.h"
+#include "gromacs/utility/programcontext.h"
+#include "gromacs/utility/smalloc.h"
 
 struct output_env
 {
-    output_env()
-    {
-        setDefaults();
-    }
-    output_env(int argc, const char *const argv[])
-        : programContext(argc, argv)
-    {
-        setDefaults();
-    }
-
-    void setDefaults()
+    explicit output_env(const gmx::ProgramContextInterface &context)
+        : programContext(context)
     {
         time_unit   = time_ps;
         view        = FALSE;
         xvg_format  = exvgNONE;
         verbosity   = 0;
-        debug_level = 0;
     }
 
-    gmx::CommandLineProgramContext programContext;
+    const gmx::ProgramContextInterface  &programContext;
 
     /* the time unit, enum defined in oenv.h */
-    time_unit_t                    time_unit;
+    time_unit_t                          time_unit;
     /* view of file requested */
-    gmx_bool                       view;
+    gmx_bool                             view;
     /* xvg output format, enum defined in oenv.h */
-    xvg_format_t                   xvg_format;
+    xvg_format_t                         xvg_format;
     /* The level of verbosity for this program */
-    int                            verbosity;
-    /* the debug level */
-    int                            debug_level;
+    int                                  verbosity;
 };
 
 /* The source code in this file should be thread-safe.
@@ -101,19 +90,19 @@ static const char *time_units_xvgr[] = {
 
 /***** OUTPUT_ENV MEMBER FUNCTIONS ******/
 
-void output_env_init(output_env_t *oenvp, int argc, char *argv[],
+void output_env_init(output_env_t *oenvp,
+                     const gmx::ProgramContextInterface &context,
                      time_unit_t tmu, gmx_bool view, xvg_format_t xvg_format,
-                     int verbosity, int debug_level)
+                     int verbosity)
 {
     try
     {
-        output_env_t oenv = new output_env(argc, argv);
+        output_env_t oenv = new output_env(context);
         *oenvp            = oenv;
         oenv->time_unit   = tmu;
         oenv->view        = view;
         oenv->xvg_format  = xvg_format;
         oenv->verbosity   = verbosity;
-        oenv->debug_level = debug_level;
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
 }
@@ -122,7 +111,7 @@ void output_env_init_default(output_env_t *oenvp)
 {
     try
     {
-        output_env_t oenv = new output_env();
+        output_env_t oenv = new output_env(gmx::getProgramContext());
         *oenvp = oenv;
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
@@ -137,11 +126,6 @@ void output_env_done(output_env_t oenv)
 int output_env_get_verbosity(const output_env_t oenv)
 {
     return oenv->verbosity;
-}
-
-int output_env_get_debug_level(const output_env_t oenv)
-{
-    return oenv->debug_level;
 }
 
 const char *output_env_get_time_unit(const output_env_t oenv)
@@ -210,30 +194,21 @@ xvg_format_t output_env_get_xvg_format(const output_env_t oenv)
     return oenv->xvg_format;
 }
 
-const char *output_env_get_program_name(const output_env_t oenv)
+const char *output_env_get_program_display_name(const output_env_t oenv)
 {
+    const char *displayName = NULL;
+
     try
     {
-        return oenv->programContext.fullBinaryPath();
+        displayName = oenv->programContext.displayName();
     }
     GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
+
+    return displayName;
 }
 
-const char *output_env_get_short_program_name(const output_env_t oenv)
+const gmx::ProgramContextInterface &
+output_env_get_program_context(const output_env_t oenv)
 {
-    try
-    {
-        // TODO: Use the display name once it doesn't break anything.
-        return oenv->programContext.programName();
-    }
-    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
-}
-
-const char *output_env_get_cmd_line(const output_env_t oenv)
-{
-    try
-    {
-        return oenv->programContext.commandLine();
-    }
-    GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR;
+    return oenv->programContext;
 }

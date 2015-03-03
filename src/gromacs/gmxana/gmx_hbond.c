@@ -3,7 +3,7 @@
  *
  * Copyright (c) 1991-2000, University of Groningen, The Netherlands.
  * Copyright (c) 2001-2008, The GROMACS development team.
- * Copyright (c) 2013,2014, by the GROMACS development team, led by
+ * Copyright (c) 2013,2014,2015, by the GROMACS development team, led by
  * Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
  * and including many others, as listed in the AUTHORS file in the
  * top-level source directory and at http://www.gromacs.org.
@@ -34,36 +34,41 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out http://www.gromacs.org.
  */
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "gmxpre.h"
+
+#include "config.h"
+
 #include <math.h>
 
-/*#define HAVE_NN_LOOPS*/
-
 #include "gromacs/commandline/pargs.h"
-#include "copyrite.h"
-#include "sysstuff.h"
-#include "txtdump.h"
-#include "physics.h"
-#include "macros.h"
-#include "gmx_fatal.h"
-#include "index.h"
-#include "smalloc.h"
-#include "vec.h"
-#include "xvgr.h"
-#include "gstat.h"
-#include "string2.h"
-#include "pbc.h"
-#include "correl.h"
-#include "gmx_ana.h"
-#include "geminate.h"
-
-#include "gromacs/fileio/futil.h"
+#include "gromacs/correlationfunctions/autocorr.h"
+#include "gromacs/correlationfunctions/crosscorr.h"
+#include "gromacs/correlationfunctions/expfit.h"
+#include "gromacs/correlationfunctions/integrate.h"
 #include "gromacs/fileio/matio.h"
 #include "gromacs/fileio/tpxio.h"
 #include "gromacs/fileio/trxio.h"
+#include "gromacs/fileio/xvgr.h"
+#include "gromacs/gmxana/geminate.h"
+#include "gromacs/gmxana/gmx_ana.h"
+#include "gromacs/legacyheaders/copyrite.h"
+#include "gromacs/legacyheaders/macros.h"
+#include "gromacs/legacyheaders/txtdump.h"
+#include "gromacs/legacyheaders/viewit.h"
+#include "gromacs/math/units.h"
+#include "gromacs/math/vec.h"
+#include "gromacs/pbcutil/pbc.h"
+#include "gromacs/topology/index.h"
+#include "gromacs/utility/cstringutil.h"
+#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/futil.h"
 #include "gromacs/utility/gmxomp.h"
+#include "gromacs/utility/smalloc.h"
+#include "gromacs/utility/snprintf.h"
+
+#include "geminate.h"
+
+/*#define HAVE_NN_LOOPS*/
 
 typedef short int t_E;
 typedef int t_EEst;
@@ -1183,7 +1188,7 @@ static void add_dh(t_donors *ddd, int id, int ih, int grp, unsigned char *databl
 {
     int i;
 
-    if (ISDON(datable[id]) || !datable)
+    if (!datable || ISDON(datable[id]))
     {
         if (ddd->dptr[id] == NOTSET)   /* New donor */
         {
@@ -2229,7 +2234,7 @@ static void do_hblife(const char *fn, t_hbdata *hb, gmx_bool bMerge, gmx_bool bC
         integral += x1;
     }
     integral *= dt;
-    gmx_ffclose(fp);
+    xvgrclose(fp);
     printf("%s lifetime = %.2f ps\n", bContact ? "Contact" : "HB", integral);
     printf("Note that the lifetime obtained in this manner is close to useless\n");
     printf("Use the -ac option instead and check the Forward lifetime\n");
@@ -2317,157 +2322,6 @@ typedef struct {
     real *t, *ct, *nt, *kt, *sigma_ct, *sigma_nt, *sigma_kt;
 } t_luzar;
 
-#ifdef HAVE_LIBGSL
-#include <gsl/gsl_multimin.h>
-#include <gsl/gsl_sf.h>
-#include <gsl/gsl_version.h>
-
-static double my_f(const gsl_vector *v, void *params)
-{
-    t_luzar *tl = (t_luzar *)params;
-    int      i;
-    double   tol = 1e-16, chi2 = 0;
-    double   di;
-    real     k, kp;
-
-    for (i = 0; (i < tl->nparams); i++)
-    {
-        tl->kkk[i] = gsl_vector_get(v, i);
-    }
-    k  = tl->kkk[0];
-    kp = tl->kkk[1];
-
-    for (i = tl->n0; (i < tl->n1); i += tl->ndelta)
-    {
-        di = sqr(k*tl->sigma_ct[i]) + sqr(kp*tl->sigma_nt[i]) + sqr(tl->sigma_kt[i]);
-        /*di = 1;*/
-        if (di > tol)
-        {
-            chi2 += sqr(k*tl->ct[i]-kp*tl->nt[i]-tl->kt[i])/di;
-        }
-
-        else
-        {
-            fprintf(stderr, "WARNING: sigma_ct = %g, sigma_nt = %g, sigma_kt = %g\n"
-                    "di = %g k = %g kp = %g\n", tl->sigma_ct[i],
-                    tl->sigma_nt[i], tl->sigma_kt[i], di, k, kp);
-        }
-    }
-#ifdef DEBUG
-    chi2 = 0.3*sqr(k-0.6)+0.7*sqr(kp-1.3);
-#endif
-    return chi2;
-}
-
-static real optimize_luzar_parameters(FILE *fp, t_luzar *tl, int maxiter,
-                                      real tol)
-{
-    real   size, d2;
-    int    iter   = 0;
-    int    status = 0;
-    int    i;
-
-    const gsl_multimin_fminimizer_type *T;
-    gsl_multimin_fminimizer            *s;
-
-    gsl_vector                         *x, *dx;
-    gsl_multimin_function               my_func;
-
-    my_func.f      = &my_f;
-    my_func.n      = tl->nparams;
-    my_func.params = (void *) tl;
-
-    /* Starting point */
-    x = gsl_vector_alloc (my_func.n);
-    for (i = 0; (i < my_func.n); i++)
-    {
-        gsl_vector_set (x, i, tl->kkk[i]);
-    }
-
-    /* Step size, different for each of the parameters */
-    dx = gsl_vector_alloc (my_func.n);
-    for (i = 0; (i < my_func.n); i++)
-    {
-        gsl_vector_set (dx, i, 0.01*tl->kkk[i]);
-    }
-
-    T = gsl_multimin_fminimizer_nmsimplex;
-    s = gsl_multimin_fminimizer_alloc (T, my_func.n);
-
-    gsl_multimin_fminimizer_set (s, &my_func, x, dx);
-    gsl_vector_free (x);
-    gsl_vector_free (dx);
-
-    if (fp)
-    {
-        fprintf(fp, "%5s %12s %12s %12s %12s\n", "Iter", "k", "kp", "NM Size", "Chi2");
-    }
-
-    do
-    {
-        iter++;
-        status = gsl_multimin_fminimizer_iterate (s);
-
-        if (status != 0)
-        {
-            gmx_fatal(FARGS, "Something went wrong in the iteration in minimizer %s",
-                      gsl_multimin_fminimizer_name(s));
-        }
-
-        d2     = gsl_multimin_fminimizer_minimum(s);
-        size   = gsl_multimin_fminimizer_size(s);
-        status = gsl_multimin_test_size(size, tol);
-
-        if (status == GSL_SUCCESS)
-        {
-            if (fp)
-            {
-                fprintf(fp, "Minimum found using %s at:\n",
-                        gsl_multimin_fminimizer_name(s));
-            }
-        }
-
-        if (fp)
-        {
-            fprintf(fp, "%5d", iter);
-            for (i = 0; (i < my_func.n); i++)
-            {
-                fprintf(fp, " %12.4e", gsl_vector_get (s->x, i));
-            }
-            fprintf (fp, " %12.4e %12.4e\n", size, d2);
-        }
-    }
-    while ((status == GSL_CONTINUE) && (iter < maxiter));
-
-    gsl_multimin_fminimizer_free (s);
-
-    return d2;
-}
-
-static real quality_of_fit(real chi2, int N)
-{
-    return gsl_sf_gamma_inc_Q((N-2)/2.0, chi2/2.0);
-}
-
-#else
-static real optimize_luzar_parameters(FILE gmx_unused    *fp,
-                                      t_luzar gmx_unused *tl,
-                                      int gmx_unused      maxiter,
-                                      real gmx_unused     tol)
-{
-    fprintf(stderr, "This program needs the GNU scientific library to work.\n");
-
-    return -1;
-}
-static real quality_of_fit(real gmx_unused chi2, int gmx_unused N)
-{
-    fprintf(stderr, "This program needs the GNU scientific library to work.\n");
-
-    return -1;
-}
-
-#endif
-
 static real compute_weighted_rates(int n, real t[], real ct[], real nt[],
                                    real kt[], real sigma_ct[], real sigma_nt[],
                                    real sigma_kt[], real *k, real *kp,
@@ -2503,13 +2357,13 @@ static real compute_weighted_rates(int n, real t[], real ct[], real nt[],
     tl.kkk[0]   = *k;
     tl.kkk[1]   = *kp;
 
-    chi2      = optimize_luzar_parameters(debug, &tl, 1000, 1e-3);
+    chi2      = 0; /*optimize_luzar_parameters(debug, &tl, 1000, 1e-3); */
     *k        = tl.kkk[0];
     *kp       = tl.kkk[1] = *kp;
     tl.ndelta = NK;
     for (j = 0; (j < NK); j++)
     {
-        (void) optimize_luzar_parameters(debug, &tl, 1000, 1e-3);
+        /* (void) optimize_luzar_parameters(debug, &tl, 1000, 1e-3); */
         kkk += tl.kkk[0];
         kkp += tl.kkk[1];
         kk2 += sqr(tl.kkk[0]);
@@ -2525,9 +2379,10 @@ static real compute_weighted_rates(int n, real t[], real ct[], real nt[],
 static void smooth_tail(int n, real t[], real c[], real sigma_c[], real start,
                         const output_env_t oenv)
 {
-    FILE *fp;
-    real  e_1, fitparm[4];
-    int   i;
+    FILE  *fp;
+    real   e_1;
+    double fitparm[4];
+    int    i;
 
     e_1 = exp(-1);
     for (i = 0; (i < n); i++)
@@ -2546,7 +2401,8 @@ static void smooth_tail(int n, real t[], real c[], real sigma_c[], real start,
         fitparm[0] = 10;
     }
     fitparm[1] = 0.95;
-    do_lmfit(n, c, sigma_c, 0, t, start, t[n-1], oenv, bDebugMode(), effnEXP2, fitparm, 0);
+    do_lmfit(n, c, sigma_c, 0, t, start, t[n-1], oenv, bDebugMode(),
+             effnEXP2, fitparm, 0);
 }
 
 void analyse_corr(int n, real t[], real ct[], real nt[], real kt[],
@@ -2597,7 +2453,7 @@ void analyse_corr(int n, real t[], real ct[], real nt[], real kt[],
                 chi22 = compute_weighted_rates(n, t, ct, nt, kt, sigma_ct, sigma_nt,
                                                sigma_kt, &k, &kp,
                                                &sigma_k, &sigma_kp, fit_start);
-                Q   = quality_of_fit(chi2, 2);
+                Q   = 0; /* quality_of_fit(chi2, 2);*/
                 ddg = BOLTZ*temp*sigma_k/k;
                 printf("Fitting paramaters chi^2 = %10g, Quality of fit = %10g\n",
                        chi2, Q);
@@ -2694,13 +2550,16 @@ static void parallel_print(int *data, int nThreads)
 
 static void normalizeACF(real *ct, real *gt, int nhb, int len)
 {
-    real ct_fac, gt_fac;
+    real ct_fac, gt_fac = 0;
     int  i;
 
     /* Xu and Berne use the same normalization constant */
 
     ct_fac = 1.0/ct[0];
-    gt_fac = (nhb == 0) ? 0 : 1.0/(real)nhb;
+    if (nhb != 0)
+    {
+        gt_fac = 1.0/(real)nhb;
+    }
 
     printf("Normalization for c(t) = %g for gh(t) = %g\n", ct_fac, gt_fac);
     for (i = 0; i < len; i++)
@@ -3415,7 +3274,7 @@ static void do_hbac(const char *fn, t_hbdata *hb,
                 fprintf(fp, "%10g  %10g  %10g  %10g  %10g\n",
                         hb->time[j]-hb->time[0], ct[j], cct[j], ght[j], kt[j]);
             }
-            gmx_ffclose(fp);
+            xvgrclose(fp);
 
             analyse_corr(nn, hb->time, ct, ght, kt, NULL, NULL, NULL,
                          fit_start, temp, smooth_tail_start, oenv);
@@ -3470,21 +3329,31 @@ static void init_hbframe(t_hbdata *hb, int nframes, real t)
     /*set_hb(hb->hbmap[i][j]->h[m],nframes-hb->hbmap[i][j]->n0,HB_NO);*/
 }
 
-static void analyse_donor_props(const char *fn, t_hbdata *hb, int nframes, real t,
-                                const output_env_t oenv)
+static FILE *open_donor_properties_file(const char        *fn,
+                                        t_hbdata          *hb,
+                                        const output_env_t oenv)
 {
-    static FILE *fp    = NULL;
-    const char  *leg[] = { "Nbound", "Nfree" };
-    int          i, j, k, nbound, nb, nhtot;
+    FILE       *fp    = NULL;
+    const char *leg[] = { "Nbound", "Nfree" };
 
-    if (!fn)
+    if (!fn || !hb)
+    {
+        return NULL;
+    }
+
+    fp = xvgropen(fn, "Donor properties", output_env_get_xvgr_tlabel(oenv), "Number", oenv);
+    xvgr_legend(fp, asize(leg), leg, oenv);
+
+    return fp;
+}
+
+static void analyse_donor_properties(FILE *fp, t_hbdata *hb, int nframes, real t)
+{
+    int i, j, k, nbound, nb, nhtot;
+
+    if (!fp || !hb)
     {
         return;
-    }
-    if (!fp)
-    {
-        fp = xvgropen(fn, "Donor properties", output_env_get_xvgr_tlabel(oenv), "Number", oenv);
-        xvgr_legend(fp, asize(leg), leg, oenv);
     }
     nbound = 0;
     nhtot  = 0;
@@ -3534,7 +3403,7 @@ static void dump_hbmap(t_hbdata *hb,
         for (i = 0; i < isize[grp]; i++)
         {
             fprintf(fp, (i%15) ? " " : "\n");
-            fprintf(fp, " %4u", index[grp][i]+1);
+            fprintf(fp, " %4d", index[grp][i]+1);
         }
         fprintf(fp, "\n");
         /*
@@ -3550,7 +3419,7 @@ static void dump_hbmap(t_hbdata *hb,
                 {
                     for (j = 0; (j < hb->d.nhydro[i]); j++)
                     {
-                        fprintf(fp, " %4u %4u", hb->d.don[i]+1,
+                        fprintf(fp, " %4d %4d", hb->d.don[i]+1,
                                 hb->d.hydro[i][j]+1);
                     }
                     fprintf(fp, "\n");
@@ -3563,7 +3432,7 @@ static void dump_hbmap(t_hbdata *hb,
                 if (hb->a.grp[i] == grp)
                 {
                     fprintf(fp, (i%15 && !first) ? " " : "\n");
-                    fprintf(fp, " %4u", hb->a.acc[i]+1);
+                    fprintf(fp, " %4d", hb->a.acc[i]+1);
                     first = FALSE;
                 }
             }
@@ -3594,7 +3463,7 @@ static void dump_hbmap(t_hbdata *hb,
                     sprintf(as, "%s", mkatomname(atoms, aaa));
                     if (bContact)
                     {
-                        fprintf(fp, " %6u %6u\n", ddd+1, aaa+1);
+                        fprintf(fp, " %6d %6d\n", ddd+1, aaa+1);
                         if (fplog)
                         {
                             fprintf(fplog, "%12s  %12s\n", ds, as);
@@ -3604,7 +3473,7 @@ static void dump_hbmap(t_hbdata *hb,
                     {
                         hhh = hb->d.hydro[i][m];
                         sprintf(hs, "%s", mkatomname(atoms, hhh));
-                        fprintf(fp, " %6u %6u %6u\n", ddd+1, hhh+1, aaa+1);
+                        fprintf(fp, " %6d %6d %6d\n", ddd+1, hhh+1, aaa+1);
                         if (fplog)
                         {
                             fprintf(fplog, "%12s  %12s  %12s\n", ds, hs, as);
@@ -3687,40 +3556,41 @@ int gmx_hbond(int argc, char *argv[])
 
         /*    "It is also possible to analyse specific hydrogen bonds with",
               "[TT]-sel[tt]. This index file must contain a group of atom triplets",
-              "Donor Hydrogen Acceptor, in the following way:[PAR]",
+              "Donor Hydrogen Acceptor, in the following way::",
+           "",
+           "[ selected ]",
+           "     20    21    24",
+           "     25    26    29",
+           "      1     3     6",
+           "",
+           "Note that the triplets need not be on separate lines.",
+           "Each atom triplet specifies a hydrogen bond to be analyzed,",
+           "note also that no check is made for the types of atoms.[PAR]",
          */
-        "[TT]",
-        "[ selected ][BR]",
-        "     20    21    24[BR]",
-        "     25    26    29[BR]",
-        "      1     3     6[BR]",
-        "[tt][BR]",
-        "Note that the triplets need not be on separate lines.",
-        "Each atom triplet specifies a hydrogen bond to be analyzed,",
-        "note also that no check is made for the types of atoms.[PAR]",
 
-        "[BB]Output:[bb][BR]",
-        "[TT]-num[tt]:  number of hydrogen bonds as a function of time.[BR]",
-        "[TT]-ac[tt]:   average over all autocorrelations of the existence",
-        "functions (either 0 or 1) of all hydrogen bonds.[BR]",
-        "[TT]-dist[tt]: distance distribution of all hydrogen bonds.[BR]",
-        "[TT]-ang[tt]:  angle distribution of all hydrogen bonds.[BR]",
-        "[TT]-hx[tt]:   the number of n-n+i hydrogen bonds as a function of time",
-        "where n and n+i stand for residue numbers and i ranges from 0 to 6.",
-        "This includes the n-n+3, n-n+4 and n-n+5 hydrogen bonds associated",
-        "with helices in proteins.[BR]",
-        "[TT]-hbn[tt]:  all selected groups, donors, hydrogens and acceptors",
-        "for selected groups, all hydrogen bonded atoms from all groups and",
-        "all solvent atoms involved in insertion.[BR]",
-        "[TT]-hbm[tt]:  existence matrix for all hydrogen bonds over all",
-        "frames, this also contains information on solvent insertion",
-        "into hydrogen bonds. Ordering is identical to that in [TT]-hbn[tt]",
-        "index file.[BR]",
-        "[TT]-dan[tt]: write out the number of donors and acceptors analyzed for",
-        "each timeframe. This is especially useful when using [TT]-shell[tt].[BR]",
-        "[TT]-nhbdist[tt]: compute the number of HBonds per hydrogen in order to",
-        "compare results to Raman Spectroscopy.",
-        "[PAR]",
+        "[BB]Output:[bb]",
+        "",
+        " * [TT]-num[tt]:  number of hydrogen bonds as a function of time.",
+        " * [TT]-ac[tt]:   average over all autocorrelations of the existence",
+        "   functions (either 0 or 1) of all hydrogen bonds.",
+        " * [TT]-dist[tt]: distance distribution of all hydrogen bonds.",
+        " * [TT]-ang[tt]:  angle distribution of all hydrogen bonds.",
+        " * [TT]-hx[tt]:   the number of n-n+i hydrogen bonds as a function of time",
+        "   where n and n+i stand for residue numbers and i ranges from 0 to 6.",
+        "   This includes the n-n+3, n-n+4 and n-n+5 hydrogen bonds associated",
+        "   with helices in proteins.",
+        " * [TT]-hbn[tt]:  all selected groups, donors, hydrogens and acceptors",
+        "   for selected groups, all hydrogen bonded atoms from all groups and",
+        "   all solvent atoms involved in insertion.",
+        " * [TT]-hbm[tt]:  existence matrix for all hydrogen bonds over all",
+        "   frames, this also contains information on solvent insertion",
+        "   into hydrogen bonds. Ordering is identical to that in [TT]-hbn[tt]",
+        "   index file.",
+        " * [TT]-dan[tt]: write out the number of donors and acceptors analyzed for",
+        "   each timeframe. This is especially useful when using [TT]-shell[tt].",
+        " * [TT]-nhbdist[tt]: compute the number of HBonds per hydrogen in order to",
+        "   compare results to Raman Spectroscopy.",
+        "",
         "Note: options [TT]-ac[tt], [TT]-life[tt], [TT]-hbn[tt] and [TT]-hbm[tt]",
         "require an amount of memory proportional to the total numbers of donors",
         "times the total number of acceptors in the selected group(s)."
@@ -3766,18 +3636,18 @@ int gmx_hbond(int argc, char *argv[])
         { "-smooth", FALSE, etREAL, {&smooth_tail_start},
           "If >= 0, the tail of the ACF will be smoothed by fitting it to an exponential function: y = A exp(-x/[GRK]tau[grk])" },
         { "-dump",  FALSE, etINT, {&nDump},
-          "Dump the first N hydrogen bond ACFs in a single [TT].xvg[tt] file for debugging" },
+          "Dump the first N hydrogen bond ACFs in a single [REF].xvg[ref] file for debugging" },
         { "-max_hb", FALSE, etREAL, {&maxnhb},
           "Theoretical maximum number of hydrogen bonds used for normalizing HB autocorrelation function. Can be useful in case the program estimates it wrongly" },
         { "-merge", FALSE, etBOOL, {&bMerge},
           "H-bonds between the same donor and acceptor, but with different hydrogen are treated as a single H-bond. Mainly important for the ACF." },
         { "-geminate", FALSE, etENUM, {gemType},
-          "Use reversible geminate recombination for the kinetics/thermodynamics calclations. See Markovitch et al., J. Chem. Phys 129, 084505 (2008) for details."},
+          "HIDDENUse reversible geminate recombination for the kinetics/thermodynamics calclations. See Markovitch et al., J. Chem. Phys 129, 084505 (2008) for details."},
         { "-diff", FALSE, etREAL, {&D},
-          "Dffusion coefficient to use in the reversible geminate recombination kinetic model. If negative, then it will be fitted to the ACF along with ka and kd."},
+          "HIDDENDffusion coefficient to use in the reversible geminate recombination kinetic model. If negative, then it will be fitted to the ACF along with ka and kd."},
 #ifdef GMX_OPENMP
         { "-nthreads", FALSE, etINT, {&nThreads},
-          "Number of threads used for the parallel loop over autocorrelations. nThreads <= 0 means maximum number of threads. Requires linking with OpenMP. The number of threads is limited by the number of processors (before OpenMP v.3 ) or environment variable OMP_THREAD_LIMIT (OpenMP v.3)"},
+          "Number of threads used for the parallel loop over autocorrelations. nThreads <= 0 means maximum number of threads. Requires linking with OpenMP. The number of threads is limited by the number of cores (before OpenMP v.3 ) or environment variable OMP_THREAD_LIMIT (OpenMP v.3)"},
 #endif
     };
     const char *bugs[] = {
@@ -3785,7 +3655,7 @@ int gmx_hbond(int argc, char *argv[])
     };
     t_filenm    fnm[] = {
         { efTRX, "-f",   NULL,     ffREAD  },
-        { efTPX, NULL,   NULL,     ffREAD  },
+        { efTPR, NULL,   NULL,     ffREAD  },
         { efNDX, NULL,   NULL,     ffOPTRD },
         /*    { efNDX, "-sel", "select", ffOPTRD },*/
         { efXVG, "-num", "hbnum",  ffWRITE },
@@ -3830,7 +3700,7 @@ int gmx_hbond(int argc, char *argv[])
     int                   grp, nabin, nrbin, bin, resdist, ihb;
     char                **leg;
     t_hbdata             *hb, *hbptr;
-    FILE                 *fp, *fpins = NULL, *fpnhb = NULL;
+    FILE                 *fp, *fpins = NULL, *fpnhb = NULL, *donor_properties = NULL;
     t_gridcell         ***grid;
     t_ncell              *icell, *jcell, *kcell;
     ivec                  ngrid;
@@ -3857,7 +3727,7 @@ int gmx_hbond(int argc, char *argv[])
     npargs = asize(pa);
     ppa    = add_acf_pargs(&npargs, pa);
 
-    if (!parse_common_args(&argc, argv, PCA_CAN_TIME | PCA_TIME_UNIT | PCA_BE_NICE, NFILE, fnm, npargs,
+    if (!parse_common_args(&argc, argv, PCA_CAN_TIME | PCA_TIME_UNIT, NFILE, fnm, npargs,
                            ppa, asize(desc), desc, asize(bugs), bugs, &oenv))
     {
         return 0;
@@ -3902,9 +3772,6 @@ int gmx_hbond(int argc, char *argv[])
     if (bGem)
     {
         printf("Geminate recombination: %s\n", gemType[gemmode]);
-#ifndef HAVE_LIBGSL
-        printf("Note that some aspects of reversible geminate recombination won't work without gsl.\n");
-#endif
         if (bContact)
         {
             if (gemmode != gemDD)
@@ -3973,7 +3840,7 @@ int gmx_hbond(int argc, char *argv[])
     hb = mk_hbdata(bHBmap, opt2bSet("-dan", NFILE, fnm), bMerge || bContact, bGem, gemmode);
 
     /* get topology */
-    read_tpx_top(ftp2fn(efTPX, NFILE, fnm), &ir, box, &natoms, NULL, NULL, NULL, &top);
+    read_tpx_top(ftp2fn(efTPR, NFILE, fnm), &ir, box, &natoms, NULL, NULL, NULL, &top);
 
     snew(grpnames, grNR);
     snew(index, grNR);
@@ -4091,6 +3958,8 @@ int gmx_hbond(int argc, char *argv[])
     printf("Found %d donors and %d acceptors\n", hb->d.nrd, hb->a.nra);
     /*if (bSelected)
        snew(donors[gr0D], dons[gr0D].nrd);*/
+
+    donor_properties = open_donor_properties_file(opt2fn_null("-don", NFILE, fnm), hb, oenv);
 
     if (bHBmap)
     {
@@ -4520,10 +4389,7 @@ int gmx_hbond(int argc, char *argv[])
 #pragma omp barrier
 #pragma omp single
                 {
-                    if (hb != NULL)
-                    {
-                        analyse_donor_props(opt2fn_null("-don", NFILE, fnm), hb, k, t, oenv);
-                    }
+                    analyse_donor_properties(donor_properties, hb, k, t);
                 }
 
 #pragma omp single
@@ -4593,9 +4459,15 @@ int gmx_hbond(int argc, char *argv[])
     free_grid(ngrid, &grid);
 
     close_trj(status);
+
+    if (donor_properties)
+    {
+        xvgrclose(donor_properties);
+    }
+
     if (fpnhb)
     {
-        gmx_ffclose(fpnhb);
+        xvgrclose(fpnhb);
     }
 
     /* Compute maximum possible number of different hbonds */
@@ -4661,7 +4533,7 @@ int gmx_hbond(int argc, char *argv[])
         aver_nhb  += hb->nhb[i];
         aver_dist += hb->ndist[i];
     }
-    gmx_ffclose(fp);
+    xvgrclose(fp);
     aver_nhb  /= nframes;
     aver_dist /= nframes;
     /* Print HB distance distribution */
@@ -4684,7 +4556,7 @@ int gmx_hbond(int argc, char *argv[])
         {
             fprintf(fp, "%10g %10g\n", (i+0.5)*rbin, rdist[i]/(rbin*(real)sum));
         }
-        gmx_ffclose(fp);
+        xvgrclose(fp);
     }
 
     /* Print HB angle distribution */
@@ -4705,7 +4577,7 @@ int gmx_hbond(int argc, char *argv[])
         {
             fprintf(fp, "%10g %10g\n", (i+0.5)*abin, adist[i]/(abin*(real)sum));
         }
-        gmx_ffclose(fp);
+        xvgrclose(fp);
     }
 
     /* Print HB in alpha-helix */
@@ -4723,7 +4595,7 @@ int gmx_hbond(int argc, char *argv[])
             }
             fprintf(fp, "\n");
         }
-        gmx_ffclose(fp);
+        xvgrclose(fp);
     }
     if (!bNN)
     {
@@ -4758,7 +4630,7 @@ int gmx_hbond(int argc, char *argv[])
                     gmx_fatal(FARGS, "Could not initiate t_gemParams params.");
                 }
             }
-            gemstring = strdup(gemType[hb->per->gemtype]);
+            gemstring = gmx_strdup(gemType[hb->per->gemtype]);
             do_hbac(opt2fn("-ac", NFILE, fnm), hb, nDump,
                     bMerge, bContact, fit_start, temp, r2cut > 0, smooth_tail_start, oenv,
                     gemstring, nThreads, NN, bBallistic, bGemFit);
@@ -4771,6 +4643,7 @@ int gmx_hbond(int argc, char *argv[])
         {
             t_matrix mat;
             int      id, ia, hh, x, y;
+            mat.flags = mat.y0 = 0;
 
             if ((nframes > 0) && (hb->nrhb > 0))
             {
@@ -4897,9 +4770,9 @@ int gmx_hbond(int argc, char *argv[])
             if (USE_THIS_GROUP(j) )
             {
                 sprintf(buf, "Donors %s", grpnames[j]);
-                legnames[i++] = strdup(buf);
+                legnames[i++] = gmx_strdup(buf);
                 sprintf(buf, "Acceptors %s", grpnames[j]);
-                legnames[i++] = strdup(buf);
+                legnames[i++] = gmx_strdup(buf);
             }
         }
         if (i != nleg)
@@ -4919,7 +4792,7 @@ int gmx_hbond(int argc, char *argv[])
             }
             fprintf(fp, "\n");
         }
-        gmx_ffclose(fp);
+        xvgrclose(fp);
     }
 
     return 0;

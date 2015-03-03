@@ -3,7 +3,7 @@
  *
  * Copyright (c) 1991-2000, University of Groningen, The Netherlands.
  * Copyright (c) 2001-2004, The GROMACS development team.
- * Copyright (c) 2013, by the GROMACS development team, led by
+ * Copyright (c) 2013,2014, by the GROMACS development team, led by
  * Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
  * and including many others, as listed in the AUTHORS file in the
  * top-level source directory and at http://www.gromacs.org.
@@ -34,22 +34,20 @@
  * To help us fund GROMACS development, we humbly ask that you cite
  * the research papers on the package. Check out http://www.gromacs.org.
  */
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "gmxpre.h"
 
 #include <stdlib.h>
+#include <string.h>
 
-#include "string2.h"
-#include "smalloc.h"
-#include "gstat.h"
-#include "gmx_fatal.h"
-#include "index.h"
+#include "gromacs/gmxana/gstat.h"
+#include "gromacs/topology/residuetypes.h"
+#include "gromacs/utility/fatalerror.h"
+#include "gromacs/utility/smalloc.h"
 
 t_dlist *mk_dlist(FILE *log,
                   t_atoms *atoms, int *nlist,
                   gmx_bool bPhi, gmx_bool bPsi, gmx_bool bChi, gmx_bool bHChi,
-                  int maxchi, int r0, gmx_residuetype_t rt)
+                  int maxchi, int r0, gmx_residuetype_t *rt)
 {
     int       ires, i, j, k, ii;
     t_dihatms atm, prev;

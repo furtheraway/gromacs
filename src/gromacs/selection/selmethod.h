@@ -91,6 +91,9 @@
  *  - \ref SMETH_MODIFIER : If set, the method is a selection modifier and
  *    not an actual selection method.
  *    For more details, see \ref selmethods_modifiers.
+ *  - \ref SMETH_ALLOW_UNSORTED : If set, the method supports unsorted atoms
+ *    in its input parameters. \ref SMETH_MODIFIER methods are assumed to always
+ *    support unsorted atoms, as their purpose is to affect the ordering.
  *
  * There are two additional flags that specify the number of values the
  * method returns. Only one of them can be set at a time.
@@ -293,9 +296,6 @@
 #ifndef GMX_SELECTION_SELMETHOD_H
 #define GMX_SELECTION_SELMETHOD_H
 
-#include "../legacyheaders/typedefs.h"
-
-#include "indexutil.h"
 #include "selparam.h"
 #include "selvalue.h"
 
@@ -305,8 +305,12 @@ class PositionCalculationCollection;
 class SelectionParserSymbolTable;
 } // namespace gmx
 
+struct gmx_ana_index_t;
 struct gmx_ana_pos_t;
 struct gmx_ana_selcollection_t;
+struct t_pbc;
+struct t_topology;
+struct t_trxframe;
 
 /*! \name Selection method flags
  * \anchor selmethod_flags
@@ -344,6 +348,15 @@ struct gmx_ana_selcollection_t;
  * the string pointers.
  */
 #define SMETH_CHARVAL    64
+/*! \brief
+ * If set, the method accepts unsorted atoms in its input parameters.
+ *
+ * Currently, the support for this functionality is fairly limited, and only
+ * static index group references can actually contain unsorted atoms.
+ * But to make this single case work, the position evaluation must support
+ * unsorted atoms as well.
+ */
+#define SMETH_ALLOW_UNSORTED 128
 /*! \brief
  * If set, the method is a selection modifier.
  *
@@ -543,6 +556,11 @@ typedef void  (*sel_framefunc)(t_topology *top, t_trxframe *fr, t_pbc *pbc,
  * For \ref STR_VALUE methods, the pointers stored in \p out->s are discarded
  * without freeing; it is the responsibility of this function to provide
  * pointers that can be discarded without memory leaks.
+ *
+ * If the method accesses \p fr outside the index group specified in \p g or
+ * what it receives from its parameters, it must check that \p fr actually
+ * contains such an atom in case the \p fr has been loaded from a trajectory
+ * that only contains a subset of the system.
  */
 typedef void  (*sel_updatefunc)(t_topology *top, t_trxframe *fr, t_pbc *pbc,
                                 gmx_ana_index_t *g, gmx_ana_selvalue_t *out,
@@ -560,21 +578,26 @@ typedef void  (*sel_updatefunc)(t_topology *top, t_trxframe *fr, t_pbc *pbc,
  * \param      data Internal data structure from sel_datafunc().
  * \returns    0 on success, a non-zero error code on error.
  *
- * This function should evaluate the method for each position in \p g,
+ * This function should evaluate the method for each position in \p pos,
  * and write the output values to \p out. The pointer in the union \p out->u
  * that corresponds to the type of the method should be used.
  * Enough memory has been allocated to store the output values.
  * The number of values in \p out should also be updated if necessary.
- * However, \ref POS_VALUE or \ref GROUP_VALUE methods should not touch
- * \p out->nr (it should be 1 anyways).
+ * \ref POS_VALUE or \ref GROUP_VALUE methods should not touch
+ * \p out->nr (it should be 1 anyways).  For other types of methods, the number
+ * of output values should equal the number of positions in \p pos.
  *
  * For \ref STR_VALUE methods, the pointers stored in \p out->s are discarded
  * without freeing; it is the responsibility of this function to provide
  * pointers that can be discarded without memory leaks.
+ *
+ * If the method accesses \p fr outside the atoms referenced in \p pos or
+ * what it receives from its parameters, it must check that \p fr actually
+ * contains such an atom in case the \p fr has been loaded from a trajectory
+ * that only contains a subset of the system.
  */
 typedef void  (*sel_updatefunc_pos)(t_topology *top, t_trxframe *fr, t_pbc *pbc,
-                                    struct gmx_ana_pos_t *pos,
-                                    gmx_ana_selvalue_t *out,
+                                    gmx_ana_pos_t *pos, gmx_ana_selvalue_t *out,
                                     void *data);
 
 /*! \internal
@@ -584,7 +607,7 @@ typedef void  (*sel_updatefunc_pos)(t_topology *top, t_trxframe *fr, t_pbc *pbc,
  * If some information is not available, the corresponding field can be set to
  * 0/NULL.
  */
-typedef struct gmx_ana_selmethod_help_t
+struct gmx_ana_selmethod_help_t
 {
     /*! \brief
      * One-line description of the syntax of the method.
@@ -605,7 +628,7 @@ typedef struct gmx_ana_selmethod_help_t
      * to NULL.
      */
     const char        **help;
-} gmx_ana_selmethod_help_t;
+};
 
 /*! \internal
  * \brief
@@ -620,7 +643,7 @@ typedef struct gmx_ana_selmethod_help_t
  * More details on implementing new selection methods can be found on a
  * separate page: \ref page_module_selection_custom.
  */
-typedef struct gmx_ana_selmethod_t
+struct gmx_ana_selmethod_t
 {
     /** Name of the method. */
     const char         *name;
@@ -657,7 +680,7 @@ typedef struct gmx_ana_selmethod_t
 
     /** Help data for the method. */
     gmx_ana_selmethod_help_t help;
-} gmx_ana_selmethod_t;
+};
 
 /** Registers a selection method. */
 int

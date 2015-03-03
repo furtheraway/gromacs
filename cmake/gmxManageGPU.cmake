@@ -1,7 +1,7 @@
 #
 # This file is part of the GROMACS molecular simulation package.
 #
-# Copyright (c) 2012,2013,2014, by the GROMACS development team, led by
+# Copyright (c) 2012,2013,2014,2015, by the GROMACS development team, led by
 # Mark Abraham, David van der Spoel, Berk Hess, and Erik Lindahl,
 # and including many others, as listed in the AUTHORS file in the
 # top-level source directory and at http://www.gromacs.org.
@@ -57,18 +57,40 @@ if ((GMX_GPU OR GMX_GPU_AUTO) AND NOT GMX_GPU_DETECTION_DONE)
     gmx_detect_gpu()
 endif()
 
+# CMake 3.0-3.1 has a bug in the following case, which breaks
+# configuration on at least BlueGene/Q. Fixed in 3.1.1
+if ((NOT CMAKE_VERSION VERSION_LESS "3.0.0") AND
+    (CMAKE_VERSION VERSION_LESS "3.1.1") AND
+        (CMAKE_CROSSCOMPILING AND NOT CMAKE_SYSTEM_PROCESSOR))
+    message(STATUS "Cannot search for CUDA because the CMake find package has a bug. Set a valid CMAKE_SYSTEM_PROCESSOR if you need to detect CUDA")
+else()
+    set(CAN_RUN_CUDA_FIND_PACKAGE 1)
+endif()
+
 # We need to call find_package even when we've already done the detection/setup
-if(GMX_GPU OR GMX_GPU_AUTO)
+if(GMX_GPU OR GMX_GPU_AUTO AND CAN_RUN_CUDA_FIND_PACKAGE)
     if(NOT GMX_GPU AND NOT GMX_DETECT_GPU_AVAILABLE)
         # Stay quiet when detection has occured and found no GPU.
         # Noise is acceptable when there is a GPU or the user required one.
         set(FIND_CUDA_QUIETLY QUIET)
     endif()
-    # We support CUDA >=v4.0 on *nix, but <= v4.1 doesn't work with MSVC
-    if(MSVC)
-        find_package(CUDA 4.1 ${FIND_CUDA_QUIETLY})
-    else()
-        find_package(CUDA 4.0 ${FIND_CUDA_QUIETLY})
+    find_package(CUDA ${REQUIRED_CUDA_VERSION} ${FIND_CUDA_QUIETLY})
+
+    # Cmake 2.8.12 (and CMake 3.0) introduced a new bug where the cuda
+    # library dir is added twice as an rpath on APPLE, which in turn causes
+    # the install_name_tool to wreck the binaries when it tries to remove this
+    # path. Since this is set inside the cuda module, we remove the extra rpath
+    # added in the library string - an rpath is not a library anyway, and at
+    # least for Gromacs this works on all CMake versions. This should be
+    # reasonably future-proof, since newer versions of CMake appear to handle
+    # the rpath automatically based on the provided library path, meaning
+    # the explicit rpath specification is no longer needed.
+    if(APPLE AND (CMAKE_VERSION VERSION_GREATER 2.8.11))
+        foreach(elem ${CUDA_LIBRARIES})
+            if(elem MATCHES "-Wl,.*")
+                list(REMOVE_ITEM CUDA_LIBRARIES ${elem})
+            endif()
+        endforeach(elem)
     endif()
 endif()
 
@@ -107,7 +129,7 @@ Compute capability information not available, consult the NVIDIA website:
 https://developer.nvidia.com/cuda-gpus")
     endif()
 
-        set(CUDA_NOTFOUND_MESSAGE "mdrun supports native GPU acceleration on NVIDIA hardware with compute capability >=2.0 (Fermi or later). This requires the NVIDIA CUDA toolkit, which was not found. Its location can be hinted by setting the CUDA_TOOLKIT_ROOT_DIR CMake option (does not work as an environment variable). The typical location would be /usr/local/cuda[-version]. Note that CPU or GPU acceleration can be selected at runtime.
+        set(CUDA_NOTFOUND_MESSAGE "mdrun supports native GPU acceleration on NVIDIA hardware with compute capability >= ${REQUIRED_CUDA_COMPUTE_CAPABILITY} (Fermi or later). This requires the NVIDIA CUDA toolkit, which was not found. Its location can be hinted by setting the CUDA_TOOLKIT_ROOT_DIR CMake option (does not work as an environment variable). The typical location would be /usr/local/cuda[-version]. Note that CPU or GPU acceleration can be selected at runtime.
 
 ${_msg}")
         unset(_msg)
@@ -129,6 +151,17 @@ ${_msg}")
         endif()
     endif() # NOT CUDA_FOUND
 endif()
+
+# Try to find NVML if a GPU accelerated binary should be build.
+if (GMX_GPU)
+    find_package(NVML)
+    if(NVML_FOUND)
+        include_directories(${NVML_INCLUDE_DIR})
+        set(HAVE_NVML 1)
+        list(APPEND GMX_EXTRA_LIBRARIES ${NVML_LIBRARY})
+    endif(NVML_FOUND)
+endif()
+
 # Annoyingly enough, FindCUDA leaves a few variables behind as non-advanced.
 # We need to mark these advanced outside the conditional, otherwise, if the
 # user turns GMX_GPU=OFF after a failed cmake pass, these variables will be

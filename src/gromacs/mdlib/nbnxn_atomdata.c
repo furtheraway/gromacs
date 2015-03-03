@@ -33,23 +33,29 @@
  * the research papers on the package. Check out http://www.gromacs.org.
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "gmxpre.h"
 
-#include <math.h>
-#include <string.h>
-#include <assert.h>
-#include "smalloc.h"
-#include "macros.h"
-#include "vec.h"
-#include "nbnxn_consts.h"
-#include "nbnxn_internal.h"
 #include "nbnxn_atomdata.h"
-#include "nbnxn_search.h"
-#include "gromacs/utility/gmxomp.h"
-#include "gmx_omp_nthreads.h"
+
+#include "config.h"
+
+#include <assert.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "thread_mpi/atomic.h"
+
+#include "gromacs/legacyheaders/gmx_omp_nthreads.h"
+#include "gromacs/legacyheaders/macros.h"
+#include "gromacs/math/vec.h"
+#include "gromacs/mdlib/nb_verlet.h"
+#include "gromacs/mdlib/nbnxn_consts.h"
+#include "gromacs/mdlib/nbnxn_internal.h"
+#include "gromacs/mdlib/nbnxn_search.h"
+#include "gromacs/pbcutil/ishift.h"
+#include "gromacs/utility/gmxomp.h"
+#include "gromacs/utility/smalloc.h"
 
 /* Default nbnxn allocation routine, allocates NBNXN_MEM_ALIGN byte aligned */
 void nbnxn_alloc_aligned(void **ptr, size_t nbytes)
@@ -851,7 +857,7 @@ static void copy_lj_to_nbat_lj_comb_x8(const real *ljparam_type,
     }
 }
 
-/* Sets the atom type and LJ data in nbnxn_atomdata_t */
+/* Sets the atom type in nbnxn_atomdata_t */
 static void nbnxn_atomdata_set_atomtypes(nbnxn_atomdata_t    *nbat,
                                          int                  ngrid,
                                          const nbnxn_search_t nbs,
@@ -872,9 +878,30 @@ static void nbnxn_atomdata_set_atomtypes(nbnxn_atomdata_t    *nbat,
 
             copy_int_to_nbat_int(nbs->a+ash, grid->cxy_na[i], ncz*grid->na_sc,
                                  type, nbat->ntype-1, nbat->type+ash);
+        }
+    }
+}
 
-            if (nbat->comb_rule != ljcrNONE)
+/* Sets the LJ combination rule parameters in nbnxn_atomdata_t */
+static void nbnxn_atomdata_set_ljcombparams(nbnxn_atomdata_t    *nbat,
+                                            int                  ngrid,
+                                            const nbnxn_search_t nbs)
+{
+    int                 g, i, ncz, ash;
+    const nbnxn_grid_t *grid;
+
+    if (nbat->comb_rule != ljcrNONE)
+    {
+        for (g = 0; g < ngrid; g++)
+        {
+            grid = &nbs->grid[g];
+
+            /* Loop over all columns and copy and fill */
+            for (i = 0; i < grid->ncx*grid->ncy; i++)
             {
+                ncz = grid->cxy_ind[i+1] - grid->cxy_ind[i];
+                ash = (grid->cell0 + grid->cxy_ind[i])*grid->na_sc;
+
                 if (nbat->XFormat == nbatX4)
                 {
                     copy_lj_to_nbat_lj_comb_x4(nbat->nbfp_comb,
@@ -1095,6 +1122,9 @@ void nbnxn_atomdata_set(nbnxn_atomdata_t    *nbat,
     {
         nbnxn_atomdata_mask_fep(nbat, ngrid, nbs);
     }
+
+    /* This must be done after masking types for FEP */
+    nbnxn_atomdata_set_ljcombparams(nbat, ngrid, nbs);
 
     nbnxn_atomdata_set_energygroups(nbat, ngrid, nbs, atinfo);
 }
@@ -1494,7 +1524,7 @@ static void nbnxn_atomdata_add_nbat_f_to_f_treereduce(const nbnxn_atomdata_t *nb
                     i0 =  b   *NBNXN_BUFFERFLAG_SIZE*nbat->fstride;
                     i1 = (b+1)*NBNXN_BUFFERFLAG_SIZE*nbat->fstride;
 
-                    if ((flags->flag[b] & (1ULL<<index[1])) || group_size > 2)
+                    if (bitmask_is_set(flags->flag[b], index[1]) || group_size > 2)
                     {
 #ifdef GMX_NBNXN_SIMD
                         nbnxn_atomdata_reduce_reals_simd
@@ -1502,11 +1532,11 @@ static void nbnxn_atomdata_add_nbat_f_to_f_treereduce(const nbnxn_atomdata_t *nb
                         nbnxn_atomdata_reduce_reals
 #endif
                             (nbat->out[index[0]].f,
-                            (flags->flag[b] & (1ULL<<index[0])) || group_size > 2,
+                            bitmask_is_set(flags->flag[b], index[0]) || group_size > 2,
                             &(nbat->out[index[1]].f), 1, i0, i1);
 
                     }
-                    else if (!(flags->flag[b] & (1ULL<<index[0])))
+                    else if (!bitmask_is_set(flags->flag[b], index[0]))
                     {
                         nbnxn_atomdata_clear_reals(nbat->out[index[0]].f,
                                                    i0, i1);
@@ -1546,7 +1576,7 @@ static void nbnxn_atomdata_add_nbat_f_to_f_stdreduce(const nbnxn_atomdata_t *nba
             nfptr = 0;
             for (out = 1; out < nbat->nout; out++)
             {
-                if (flags->flag[b] & (1U<<out))
+                if (bitmask_is_set(flags->flag[b], out))
                 {
                     fptr[nfptr++] = nbat->out[out].f;
                 }
@@ -1559,11 +1589,11 @@ static void nbnxn_atomdata_add_nbat_f_to_f_stdreduce(const nbnxn_atomdata_t *nba
                 nbnxn_atomdata_reduce_reals
 #endif
                     (nbat->out[0].f,
-                    flags->flag[b] & (1U<<0),
+                    bitmask_is_set(flags->flag[b], 0),
                     fptr, nfptr,
                     i0, i1);
             }
-            else if (!(flags->flag[b] & (1U<<0)))
+            else if (!bitmask_is_set(flags->flag[b], 0))
             {
                 nbnxn_atomdata_clear_reals(nbat->out[0].f,
                                            i0, i1);
